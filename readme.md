@@ -43,6 +43,55 @@ Process branches oldest to newest in `migration-config.psd1`. This allows, for e
 
 The installed `git-tf` launcher is configured in `migration-config.psd1` as `C:\work-temp\gittf\git-tf.cmd`.
 
+## Azure DevOps PAT permissions
+
+### Recommended for this version of `git-tf`: one short-lived PAT
+
+Create an organization-scoped Azure DevOps PAT with:
+
+| PAT scope | Access | Required for |
+|---|---|---|
+| **All scopes** | **Full access** | Deep-cloning TFVC history with the legacy `git-tf 2.0.3` client and pushing the resulting Git repository |
+
+Although **Code: Read & write** is normally sufficient for Git and basic TFVC source access, it is not sufficient for this migration with `git-tf 2.0.3`. Testing against this repository produced warnings such as:
+
+```text
+The contents for the item <TFVC path> could not be downloaded because you
+either lack read permissions or the item was destroyed.
+```
+
+The same items download successfully when the PAT is changed to **Full access**. In this case, the warning is caused by insufficient PAT scope for the legacy client, not by destroyed TFVC content.
+
+Create the PAT for only the `PA-EBR` Azure DevOps organization. Give it the shortest practical expiration that covers the Clone phase, store it only in an approved secret manager or credential store, and revoke it immediately after all four TFVC clones are complete. Do not retain a Full-access PAT for the local processing or Git push phases.
+
+### Least-privilege alternative: separate PATs
+
+Separating credentials by migration phase reduces the time for which a Full-access PAT exists:
+
+| Phase | PAT scope |
+|---|---|
+| `Clone` | **Full access**, short-lived; revoke after all four clones finish |
+| `Push` | **Code: Read & write** |
+
+The local `Assemble`, `Lfs`, and `Validate` phases do not contact Azure DevOps and do not require a PAT.
+
+If the organization requires a narrower custom-scoped PAT, test it first against a disposable clone. Do not assume that **Code: Read & write** is adequate merely because it can list TFVC items; a successful deep clone must also download every historical file revision.
+
+### Account and repository permissions
+
+A PAT cannot grant permissions that its owner does not already have. The identity creating the PAT must also have:
+
+- **TFVC:** `Read` permission on each requested path and its history:
+  - `$/CWDS/apps/DEV-R19.5`
+  - `$/CWDS/apps/DEV-R20.1`
+  - `$/CWDS/apps/DEV-R20.1.5`
+  - `$/CWDS/apps/DEV-R20.2`
+- **Destination Git repository:** `Read`, `Contribute`, `Create branch`, and `Create tag`.
+
+Repository creation permission is needed only by the person who manually creates the empty destination repository. It is not needed by the migration script.
+
+Do not put a PAT in `migration-config.psd1`, the repository, a script argument, or a Git remote URL. Let `git-tf` and Git prompt for credentials or use Windows Git Credential Manager. When a username is required for PAT authentication, use the Azure DevOps user name and enter the PAT as the password.
+
 ## Runbook
 
 Run from a 64-bit PowerShell prompt:
@@ -118,3 +167,23 @@ Git LFS solves oversized-blob problems, but it is not a substitute for removing 
 - [Import and migrate repositories from TFVC to Git](https://learn.microsoft.com/azure/devops/repos/git/import-from-tfvc)
 - [Git limits in Azure Repos](https://learn.microsoft.com/azure/devops/repos/git/limits)
 - [Manage large files in Git](https://learn.microsoft.com/azure/devops/repos/git/manage-large-files)
+- [Use personal access tokens in Azure DevOps](https://learn.microsoft.com/azure/devops/organizations/accounts/use-personal-access-tokens-to-authenticate)
+- [Set Git repository permissions](https://learn.microsoft.com/azure/devops/repos/git/set-git-repository-permissions)
+- [Set TFVC repository permissions](https://learn.microsoft.com/azure/devops/repos/tfvc/set-tfvc-repository-permissions)
+
+## Azure VM recommendations
+
+For this migration, the deep TFVC clones are expected to be the longest phase because each source path exceeds 1 GB and `git-tf clone --deep` downloads every historical revision. Running the migration on a Windows VM in **East US 2**, close to the Azure DevOps repositories, can reduce dependence on the local internet connection and may improve clone and push throughput.
+
+Recommended starting configuration:
+
+- **Region:** East US 2.
+- **VM:** An 8-vCPU compute-optimized VM, such as `Standard_F8s_v2`, or a current equivalent with strong single-core performance and adequate network bandwidth.
+- **Memory:** At least 16 GB; 32 GB provides more headroom for assembly, LFS migration, and validation.
+- **Storage:** A dedicated Premium SSD v2 or Premium SSD data disk. Put both `WorkRoot` and `OutputRepository` on this disk rather than Azure Files, a network share, or the VM's temporary disk.
+- **Capacity:** Free space of at least three times the combined estimated source size; five times is safer while the four clones, assembled repository, Git rewrite data, and LFS objects coexist.
+- **Security:** Use an approved secret store or Git Credential Manager for the short-lived PAT, restrict VM access, enable disk encryption, and revoke the Full-access clone PAT immediately after cloning.
+
+More CPU cores alone may not shorten the Clone phase substantially because the script currently clones each TFVC path sequentially. Network throughput, TFVC service response time, changeset count, and disk performance are likely to be more important. The local `Assemble`, `Lfs`, and `Validate` phases benefit primarily from fast storage and, to a lesser extent, CPU performance.
+
+Before final cutover, run a rehearsal and record the duration of each phase separately. Start with the recommended VM size, then resize only if Azure metrics show sustained CPU, disk, or network saturation. Keep the work disk until validation and the clean-clone acceptance check have passed, then securely remove the migration data and deallocate the VM to stop compute charges.
