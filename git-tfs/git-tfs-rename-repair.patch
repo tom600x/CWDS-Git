@@ -1,0 +1,157 @@
+diff --git a/src/CommonAssemblyInfo.cs b/src/CommonAssemblyInfo.cs
+index 674ea8c..5c5e786 100644
+--- a/src/CommonAssemblyInfo.cs
++++ b/src/CommonAssemblyInfo.cs
+@@ -3,7 +3,6 @@
+ [assembly: AssemblyCompany("GitTfs")]
+ [assembly: AssemblyProduct("GitTfs")]
+ [assembly: AssemblyCopyright("Copyright © 2009-2019")]
+-[assembly: AssemblyVersion("0.0.1")]
+-[assembly: AssemblyFileVersion("0.0.1")]
+-[assembly: AssemblyInformationalVersion("0.0.1+f2db4336ba.shouldBeGeneratedByCakeDuringBuild")]
+-
++[assembly: AssemblyVersion("0.34.0.0")]
++[assembly: AssemblyFileVersion("0.34.0.0")]
++[assembly: AssemblyInformationalVersion("0.34.0+cwds-verified-rename-source")]
+diff --git a/src/GitTfs/Util/ChangeSieve.cs b/src/GitTfs/Util/ChangeSieve.cs
+index d8177ed..63ec36c 100644
+--- a/src/GitTfs/Util/ChangeSieve.cs
++++ b/src/GitTfs/Util/ChangeSieve.cs
+@@ -1,4 +1,5 @@
+-﻿using System.Collections.Generic;
++using System;
++using System.Collections.Generic;
+ using System.Diagnostics;
+ using System.Linq;
+ using GitTfs.Core;
+@@ -186,6 +187,44 @@ private string GetPathBeforeRename(IItem item)
+             var oldItem = item.VersionControlServer.GetItem(item.ItemId, previousChangeset);
+             if (null == oldItem)
+             {
++                var overrideKey = $"GIT_TFS_RENAME_SOURCE_{item.ChangesetId}_{item.ItemId}";
++                var sourceOverride = Environment.GetEnvironmentVariable(overrideKey);
++                if (string.IsNullOrEmpty(sourceOverride))
++                {
++                    var branchKey = $"GIT_TFS_RENAME_BRANCH_{item.ChangesetId}";
++                    var branchOverride = Environment.GetEnvironmentVariable(branchKey);
++                    if (!string.IsNullOrEmpty(branchOverride))
++                    {
++                        var branches = branchOverride.Split('|');
++                        if (branches.Length != 2 || !branches[0].StartsWith("$/", StringComparison.Ordinal)
++                            || !branches[1].StartsWith("$/", StringComparison.Ordinal)
++                            || branches[0].EndsWith("/") || branches[1].EndsWith("/"))
++                            throw new GitTfsException($"Invalid rename branch override {branchKey}.");
++
++                        if (item.ServerItem.StartsWith(branches[0] + "/", StringComparison.OrdinalIgnoreCase))
++                        {
++                            overrideKey = branchKey;
++                            sourceOverride = item.ServerItem + "|" + branches[1]
++                                + item.ServerItem.Substring(branches[0].Length);
++                        }
++                    }
++                }
++                if (!string.IsNullOrEmpty(sourceOverride))
++                {
++                    var paths = sourceOverride.Split('|');
++                    if (paths.Length != 2 || !paths[0].Equals(item.ServerItem, StringComparison.OrdinalIgnoreCase)
++                        || !paths[1].StartsWith("$/", StringComparison.Ordinal))
++                        throw new GitTfsException($"Invalid rename source override {overrideKey} for {item.ServerItem}.");
++
++                    oldItem = item.VersionControlServer.GetItem(paths[1], previousChangeset);
++                    if (oldItem == null || oldItem.ItemType != TfsItemType.File || oldItem.DeletionId != 0
++                        || !oldItem.ServerItem.Equals(paths[1], StringComparison.OrdinalIgnoreCase))
++                        throw new GitTfsException($"Rename source {paths[1]} could not be verified at C{previousChangeset}.");
++
++                    Trace.TraceInformation($"Verified rename source override: {item.ServerItem} -> {oldItem.ServerItem} at C{previousChangeset}.");
++                    return oldItem.ServerItem;
++                }
++
+                 try
+                 {
+                     var history = item.VersionControlServer.QueryHistory(item.ServerItem, item.ChangesetId, 0,
+diff --git a/src/GitTfsTest/Core/RenameSourceOverrideTests.cs b/src/GitTfsTest/Core/RenameSourceOverrideTests.cs
+new file mode 100644
+index 0000000..a71417f
+--- /dev/null
++++ b/src/GitTfsTest/Core/RenameSourceOverrideTests.cs
+@@ -0,0 +1,80 @@
++using System;
++using System.Collections.Generic;
++using System.Linq;
++using GitTfs.Core;
++using GitTfs.Core.TfsInterop;
++using GitTfs.Util;
++using Moq;
++using Xunit;
++
++namespace GitTfs.Test.Core
++{
++    public class RenameSourceOverrideTests
++    {
++        private const string OverrideKey = "GIT_TFS_RENAME_SOURCE_41562_11797985";
++        private const string Destination = "$/Archive/file.gif";
++        private const string Source = "$/Original/file.gif";
++
++        [Theory]
++        [InlineData(true, false, false, false)]
++        [InlineData(false, false, false, false)]
++        [InlineData(true, true, false, false)]
++        [InlineData(true, false, true, false)]
++        [InlineData(true, false, false, true)]
++        [InlineData(false, false, false, true)]
++        [InlineData(true, false, true, true)]
++        public void VerifiesSourceBeforeAvoidingHistory(bool sourceExists, bool wrongDestination, bool deletedSource, bool branchRule)
++        {
++            var key = branchRule ? "GIT_TFS_RENAME_BRANCH_41562" : OverrideKey;
++            var original = Environment.GetEnvironmentVariable(key);
++            try
++            {
++                Environment.SetEnvironmentVariable(key, branchRule ? "$/Archive|$/Original" :
++                    (wrongDestination ? "$/Wrong/file.gif" : Destination) + "|" + Source);
++                var server = new Mock<IVersionControlServer>(MockBehavior.Strict);
++                server.Setup(s => s.GetItem(11797985, 41561)).Returns((IItem)null);
++                var oldItem = new Mock<IItem>();
++                oldItem.SetupGet(i => i.ServerItem).Returns(Source);
++                oldItem.SetupGet(i => i.ItemType).Returns(TfsItemType.File);
++                oldItem.SetupGet(i => i.DeletionId).Returns(deletedSource ? 1 : 0);
++                server.Setup(s => s.GetItem(Source, 41561)).Returns(sourceExists ? oldItem.Object : null);
++                var item = new Mock<IItem>();
++                item.SetupGet(i => i.VersionControlServer).Returns(server.Object);
++                item.SetupGet(i => i.ItemId).Returns(11797985);
++                item.SetupGet(i => i.ChangesetId).Returns(41562);
++                item.SetupGet(i => i.ServerItem).Returns(Destination);
++                item.SetupGet(i => i.ItemType).Returns(TfsItemType.File);
++                var change = new Mock<IChange>();
++                change.SetupGet(c => c.Item).Returns(item.Object);
++                change.SetupGet(c => c.ChangeType).Returns(TfsChangeType.Rename);
++                var changeset = new Mock<IChangeset>();
++                changeset.SetupGet(c => c.Changes).Returns(new[] { change.Object });
++                var remote = new Mock<IGitTfsRemote>();
++                remote.Setup(r => r.GetPathInGitRepo(It.IsAny<string>()))
++                    .Returns((string p) => p == Destination ? "file.gif" : null);
++                var subject = new ChangeSieve(changeset.Object,
++                    new PathResolver(remote.Object, "", new Dictionary<string, GitObject>()));
++
++                if (sourceExists && !wrongDestination && !deletedSource)
++                {
++                    var applied = subject.GetChangesToApply().ToArray();
++                    Assert.Single(applied);
++                    Assert.Equal(ChangeType.Update, applied[0].Type);
++                    Assert.Equal("file.gif", applied[0].GitPath);
++                    server.Verify(s => s.GetItem(Source, 41561), Times.Once);
++                }
++                else
++                {
++                    Assert.Throws<GitTfsException>(() => subject.GetChangesToApply().ToArray());
++                }
++                server.Verify(s => s.QueryHistory(It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int>(),
++                    It.IsAny<TfsRecursionType>(), It.IsAny<string>(), It.IsAny<int>(), It.IsAny<int>(),
++                    It.IsAny<int>(), It.IsAny<bool>(), It.IsAny<bool>(), It.IsAny<bool>()), Times.Never);
++            }
++            finally
++            {
++                Environment.SetEnvironmentVariable(key, original);
++            }
++        }
++    }
++}

@@ -4,6 +4,9 @@ param(
     [ValidateSet('Preflight', 'Clone', 'Assemble', 'Lfs', 'Validate', 'Push', 'All')]
     [string]$Phase = 'Preflight',
     [switch]$ForceReclone,
+    [bool]$DeepClone = $true,
+    [ValidateRange(1, 16)]
+    [int]$MaxParallelClones = 1,
     [switch]$AllowNonEmptyDestination
 )
 
@@ -370,6 +373,8 @@ function Invoke-ClonePhase {
     param([Parameter(Mandatory)][hashtable]$Config)
 
     Invoke-Preflight $Config
+    $pendingClones = [System.Collections.Generic.List[object]]::new()
+
     foreach ($definition in @($Config.Main) + @($Config.Branches)) {
         $clonePath = Get-ClonePath $Config $definition
         $markerPath = Get-CloneMarkerPath $Config $definition
@@ -383,6 +388,10 @@ function Invoke-ClonePhase {
             (Test-Path -LiteralPath (Join-Path $clonePath '.git')) -and
             (Test-Path -LiteralPath $markerPath -PathType Leaf)
         ) {
+            $marker = [IO.File]::ReadAllText($markerPath)
+            if ($DeepClone -and $marker.StartsWith('snapshot|', [StringComparison]::Ordinal)) {
+                throw "Clone path '$clonePath' contains only a current-snapshot test clone. Use -ForceReclone to replace it with a deep clone."
+            }
             Write-Host "Skipping completed clone: $($definition.TfvcPath)"
             continue
         }
@@ -390,23 +399,113 @@ function Invoke-ClonePhase {
             throw "Clone path '$clonePath' is incomplete. Inspect it, then move it aside or use -ForceReclone."
         }
 
-        Write-Step "Deep-cloning $($definition.TfvcPath)"
-        Invoke-Native -FilePath $Config.GitTfPath -Arguments @(
+        $cloneArguments = @(
             'clone',
             $Config.CollectionUrl,
             $definition.TfvcPath,
-            $clonePath,
-            '--deep',
-            '--tag'
+            $clonePath
         )
-        Get-TfvcChangeset $clonePath (Get-SingleRootCommit $clonePath 'HEAD') | Out-Null
-        New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($markerPath)) -Force | Out-Null
-        [IO.File]::WriteAllText($markerPath, (Get-Date).ToString('o'))
+        if ($DeepClone) {
+            $cloneArguments += '--deep'
+        }
+        $cloneArguments += '--tag'
+
+        $pendingClones.Add([pscustomobject]@{
+            Definition = $definition
+            ClonePath = $clonePath
+            MarkerPath = $markerPath
+            Arguments = $cloneArguments
+        })
+    }
+
+    if ($pendingClones.Count -eq 0) {
+        return
+    }
+
+    $completeClone = {
+        param($Clone)
+
+        Get-TfvcChangeset $Clone.ClonePath (Get-SingleRootCommit $Clone.ClonePath 'HEAD') | Out-Null
+        New-Item -ItemType Directory -Path ([IO.Path]::GetDirectoryName($Clone.MarkerPath)) -Force | Out-Null
+        $cloneMode = if ($DeepClone) { 'deep' } else { 'snapshot' }
+        [IO.File]::WriteAllText($Clone.MarkerPath, "$cloneMode|$((Get-Date).ToString('o'))")
+    }
+
+    if ($MaxParallelClones -eq 1 -or $pendingClones.Count -eq 1) {
+        foreach ($clone in $pendingClones) {
+            $cloneDescription = if ($DeepClone) { 'Deep-cloning' } else { 'Cloning current snapshot of' }
+            Write-Step "$cloneDescription $($clone.Definition.TfvcPath)"
+            Invoke-Native -FilePath $Config.GitTfPath -Arguments $clone.Arguments
+            & $completeClone $clone
+        }
+        return
+    }
+
+    Write-Step "Cloning up to $MaxParallelClones TFVC paths concurrently"
+    Write-Host 'Parallel cloning requires non-interactive authentication to already be available.'
+
+    $queue = [System.Collections.Queue]::new()
+    foreach ($clone in $pendingClones) {
+        $queue.Enqueue($clone)
+    }
+
+    $running = @{}
+    $failures = [System.Collections.Generic.List[string]]::new()
+    while ($queue.Count -gt 0 -or $running.Count -gt 0) {
+        while ($queue.Count -gt 0 -and $running.Count -lt $MaxParallelClones) {
+            $clone = $queue.Dequeue()
+            Write-Host "Starting clone: $($clone.Definition.TfvcPath)"
+            $job = Start-Job -ScriptBlock {
+                param($FilePath, $Arguments)
+
+                & $FilePath @Arguments
+                if ($LASTEXITCODE -ne 0) {
+                    throw "'$FilePath $($Arguments -join ' ')' failed with exit code $LASTEXITCODE."
+                }
+            } -ArgumentList $Config.GitTfPath, $clone.Arguments
+            $running[$job.Id] = [pscustomobject]@{
+                Job = $job
+                Clone = $clone
+            }
+        }
+
+        $activeJobs = @($running.Values | ForEach-Object Job)
+        $completedJob = Wait-Job -Job $activeJobs -Any
+        $entry = $running[$completedJob.Id]
+        try {
+            Receive-Job -Job $completedJob
+            if ($completedJob.State -ne 'Completed') {
+                throw "Background clone ended in state '$($completedJob.State)'."
+            }
+            & $completeClone $entry.Clone
+            Write-Host "Completed clone: $($entry.Clone.Definition.TfvcPath)"
+        }
+        catch {
+            $failures.Add("$($entry.Clone.Definition.TfvcPath): $($_.Exception.Message)")
+        }
+        finally {
+            Remove-Job -Job $completedJob -Force
+            $running.Remove($completedJob.Id)
+        }
+    }
+
+    if ($failures.Count -gt 0) {
+        throw "One or more clones failed:`n$($failures -join "`n")"
     }
 }
 
 function Invoke-AssemblePhase {
     param([Parameter(Mandatory)][hashtable]$Config)
+
+    foreach ($definition in @($Config.Main) + @($Config.Branches)) {
+        $markerPath = Get-CloneMarkerPath $Config $definition
+        if (
+            (Test-Path -LiteralPath $markerPath -PathType Leaf) -and
+            [IO.File]::ReadAllText($markerPath).StartsWith('snapshot|', [StringComparison]::Ordinal)
+        ) {
+            throw "Cannot assemble from snapshot-only clone '$($definition.GitBranch)'. Re-run the Clone phase with -ForceReclone to import deep history."
+        }
+    }
 
     $mainSource = Get-ClonePath $Config $Config.Main
     if (-not (Test-Path -LiteralPath (Join-Path $mainSource '.git'))) {

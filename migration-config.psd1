@@ -16,11 +16,7 @@
             TfvcPath = '$/CWDS/apps/DEV-R20.1'
             GitBranch = 'DEV-R20.1'
         }
-        @{
-            TfvcPath = '$/CWDS/apps/DEV-R20.1.5'
-            GitBranch = 'DEV-R20.1.5'
-        }
-        @{
+       @{
             TfvcPath = '$/CWDS/apps/DEV-R20.2'
             GitBranch = 'DEV-R20.2'
         }

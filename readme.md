@@ -2,7 +2,7 @@
 
 ## Recommendation
 
-Use `git-tf` to deep-clone only the four required TFVC paths into separate local repositories, assemble them into one Git repository, reconstruct proven branch ancestry, convert oversized historical blobs to Git LFS, validate, and push to a new empty Azure Repos Git repository.
+Use `git-tf` to deep-clone only the three required TFVC paths into separate local repositories, assemble them into one Git repository, reconstruct proven branch ancestry, convert oversized historical blobs to Git LFS, validate, and push to a new empty Azure Repos Git repository.
 
 This avoids the Azure DevOps automatic TFVC import and does not migrate unrelated TFVC branches.
 
@@ -12,14 +12,13 @@ This avoids the Azure DevOps automatic TFVC import and does not migrate unrelate
 |---|---|
 | `$/CWDS/apps/DEV-R19.5` | `main` |
 | `$/CWDS/apps/DEV-R20.1` | `DEV-R20.1` |
-| `$/CWDS/apps/DEV-R20.1.5` | `DEV-R20.1.5` |
 | `$/CWDS/apps/DEV-R20.2` | `DEV-R20.2` |
 
 Change the Git branch names in `migration-config.psd1` if a different convention is desired.
 
 ## Why the branches are not simply fetched together
 
-`git-tf clone --deep` creates one Git history for one TFVC path. Four independent clones therefore have four unrelated root commits even when the TFVC folders were created as branches.
+`git-tf clone --deep` creates one Git history for one TFVC path. Three independent clones therefore have three unrelated root commits even when the TFVC folders were created as branches.
 
 The assembly phase handles this conservatively:
 
@@ -29,15 +28,15 @@ The assembly phase handles this conservatively:
 4. It recreates the imported root with that proven parent and rebases the remaining commits.
 5. It stops if no exact tree match exists. It never guesses ancestry.
 
-Process branches oldest to newest in `migration-config.psd1`. This allows, for example, `DEV-R20.1.5` to match a branch point on `DEV-R20.1` if that is its actual TFVC lineage. Every resulting branch remains descended from `main`.
+Process branches oldest to newest in `migration-config.psd1`. This allows a later branch to match a branch point on an earlier imported branch if that is its actual TFVC lineage. Every resulting branch remains descended from `main`.
 
 ## Prerequisites
 
 - 64-bit Git for Windows.
 - Git LFS.
 - A Java runtime installed. The script refreshes its process `PATH` from the current machine and user environment variables before checking Java, which handles terminals opened before Java was installed.
-- TFVC read permission for all four paths and their histories.
-- Enough local free space for four TFVC clones, the assembled repository, rewrite temporary space, and working trees. Plan for at least three times the estimated source size, preferably more.
+- TFVC read permission for all three paths and their histories.
+- Enough local free space for three TFVC clones, the assembled repository, rewrite temporary space, and working trees. Plan for at least three times the estimated source size, preferably more.
 - A new empty Azure Repos Git repository.
 - A stable machine and network connection. Deep clones can take many hours.
 
@@ -62,7 +61,7 @@ either lack read permissions or the item was destroyed.
 
 The same items download successfully when the PAT is changed to **Full access**. In this case, the warning is caused by insufficient PAT scope for the legacy client, not by destroyed TFVC content.
 
-Create the PAT for only the `PA-EBR` Azure DevOps organization. Give it the shortest practical expiration that covers the Clone phase, store it only in an approved secret manager or credential store, and revoke it immediately after all four TFVC clones are complete. Do not retain a Full-access PAT for the local processing or Git push phases.
+Create the PAT for only the `PA-EBR` Azure DevOps organization. Give it the shortest practical expiration that covers the Clone phase, store it only in an approved secret manager or credential store, and revoke it immediately after all three TFVC clones are complete. Do not retain a Full-access PAT for the local processing or Git push phases.
 
 ### Least-privilege alternative: separate PATs
 
@@ -70,7 +69,7 @@ Separating credentials by migration phase reduces the time for which a Full-acce
 
 | Phase | PAT scope |
 |---|---|
-| `Clone` | **Full access**, short-lived; revoke after all four clones finish |
+| `Clone` | **Full access**, short-lived; revoke after all three clones finish |
 | `Push` | **Code: Read & write** |
 
 The local `Assemble`, `Lfs`, and `Validate` phases do not contact Azure DevOps and do not require a PAT.
@@ -84,7 +83,6 @@ A PAT cannot grant permissions that its owner does not already have. The identit
 - **TFVC:** `Read` permission on each requested path and its history:
   - `$/CWDS/apps/DEV-R19.5`
   - `$/CWDS/apps/DEV-R20.1`
-  - `$/CWDS/apps/DEV-R20.1.5`
   - `$/CWDS/apps/DEV-R20.2`
 - **Destination Git repository:** `Read`, `Contribute`, `Create branch`, and `Create tag`.
 
@@ -106,7 +104,23 @@ Set-Location C:\Users\thordill\source\repos\CWDS-Git
 .\Invoke-TfvcToGitMigration.ps1 -Phase Validate
 ```
 
-Each source clone is kept under `WorkRoot`. A completion marker is written only after a clone has valid TFVC metadata. The Clone phase skips repositories with that marker, so a later failure does not repeat earlier clones and an interrupted clone is never mistaken for a completed one. Use `-ForceReclone` only when an incomplete clone must be discarded and recreated.
+Deep history is enabled by default and is required to reconstruct the real branch points. A non-deep clone is useful only for quickly testing authentication, path access, and current-file retrieval:
+
+```powershell
+.\Invoke-TfvcToGitMigration.ps1 -Phase Clone -DeepClone:$false
+```
+
+The Assemble phase rejects snapshot-only clones because they do not contain the historical branch snapshots.
+
+Clones run sequentially by default. After credentials are cached and a sequential authentication test succeeds, run up to two or three independent deep clones concurrently:
+
+```powershell
+.\Invoke-TfvcToGitMigration.ps1 -Phase Clone -MaxParallelClones 2
+```
+
+Parallel cloning preserves the same history and branch-point reconstruction; it only reduces wall-clock time when the TFVC service, network, CPU, and disk can sustain concurrent work. Start with `2`. Using `3` can be faster on a well-provisioned machine, but can also be slower or less reliable if TFVC throttles requests or the disk/network is saturated. Background clone jobs cannot respond reliably to interactive credential prompts.
+
+Each source clone is kept under `WorkRoot`. A completion marker records whether it contains deep history or only a current snapshot and is written only after the clone has valid TFVC metadata. The Clone phase skips compatible repositories with that marker, so a later failure does not repeat earlier clones and an interrupted clone is never mistaken for a completed one. Use `-ForceReclone` only when an incomplete clone must be discarded or a snapshot-only test clone must be replaced with deep history.
 
 After validation:
 
@@ -136,7 +150,7 @@ Git LFS solves oversized-blob problems, but it is not a substitute for removing 
 
 1. Announce a TFVC freeze window.
 2. Complete a rehearsal migration and record total duration, repository size, LFS size, and any authentication prompts.
-3. At the start of final cutover, prevent TFVC check-ins to the four paths.
+3. At the start of final cutover, prevent TFVC check-ins to the three paths.
 4. Remove the rehearsal `WorkRoot` or point `WorkRoot` and `OutputRepository` to a fresh final location.
 5. Repeat Clone through Validate.
 6. Push to the empty destination.
@@ -147,7 +161,7 @@ Git LFS solves oversized-blob problems, but it is not a substitute for removing 
 
 ## Acceptance checks
 
-- Exactly the four requested local branches exist.
+- Exactly the three requested local branches exist.
 - All release branches have `main` as an ancestor.
 - Every assembled branch tip matched its source clone before the LFS rewrite.
 - `git fsck --full` and `git lfs fsck` pass.
@@ -181,7 +195,7 @@ Recommended starting configuration:
 - **VM:** An 8-vCPU compute-optimized VM, such as `Standard_F8s_v2`, or a current equivalent with strong single-core performance and adequate network bandwidth.
 - **Memory:** At least 16 GB; 32 GB provides more headroom for assembly, LFS migration, and validation.
 - **Storage:** A dedicated Premium SSD v2 or Premium SSD data disk. Put both `WorkRoot` and `OutputRepository` on this disk rather than Azure Files, a network share, or the VM's temporary disk.
-- **Capacity:** Free space of at least three times the combined estimated source size; five times is safer while the four clones, assembled repository, Git rewrite data, and LFS objects coexist.
+- **Capacity:** Free space of at least three times the combined estimated source size; five times is safer while the three clones, assembled repository, Git rewrite data, and LFS objects coexist.
 - **Security:** Use an approved secret store or Git Credential Manager for the short-lived PAT, restrict VM access, enable disk encryption, and revoke the Full-access clone PAT immediately after cloning.
 
 More CPU cores alone may not shorten the Clone phase substantially because the script currently clones each TFVC path sequentially. Network throughput, TFVC service response time, changeset count, and disk performance are likely to be more important. The local `Assemble`, `Lfs`, and `Validate` phases benefit primarily from fast storage and, to a lesser extent, CPU performance.
