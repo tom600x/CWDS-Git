@@ -612,7 +612,10 @@ function Invoke-ValidatePhase {
     }
 
     foreach ($branch in $Config.Branches.GitBranch) {
-        Invoke-Git $repository @('merge-base', '--is-ancestor', $Config.Main.GitBranch, $branch)
+        $mergeBase = ([string](Invoke-GitCapture $repository @(
+            'merge-base', $Config.Main.GitBranch, $branch
+        ) | Select-Object -First 1)).Trim()
+        Write-Host "$branch diverges from $($Config.Main.GitBranch) at $mergeBase."
     }
 
     Invoke-Git $repository @('fsck', '--full')

@@ -19,7 +19,7 @@
             Source = '$/CWDS/apps/DEV-R17.3'
         }
     }
-    TfsClientVersion     = '2017'
+    TfsClientVersion     = '2019'
     GitIgnorePath        = 'tfvc-migration.gitignore'
     WorkRoot             = 'C:\work-temp\cwds-git-tfs-poc'
     OutputRepository     = 'C:\work-temp\cwds-git-tfs-poc\CWDS-Git'

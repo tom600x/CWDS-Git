@@ -28,7 +28,7 @@ The assembly phase handles this conservatively:
 4. It recreates the imported root with that proven parent and rebases the remaining commits.
 5. It stops if no exact tree match exists. It never guesses ancestry.
 
-Process branches oldest to newest in `migration-config.psd1`. This allows a later branch to match a branch point on an earlier imported branch if that is its actual TFVC lineage. Every resulting branch remains descended from `main`.
+Process branches oldest to newest in `migration-config.psd1`. This allows a later branch to match a branch point on an earlier imported branch if that is its actual TFVC lineage. Every resulting branch shares history with `main` through its proven branch point.
 
 ## Prerequisites
 
@@ -162,7 +162,7 @@ Git LFS solves oversized-blob problems, but it is not a substitute for removing 
 ## Acceptance checks
 
 - Exactly the three requested local branches exist.
-- All release branches have `main` as an ancestor.
+- Every release branch has a merge base with `main` at its proven branch point.
 - Every assembled branch tip matched its source clone before the LFS rewrite.
 - `git fsck --full` and `git lfs fsck` pass.
 - No blob above the configured threshold remains outside LFS.

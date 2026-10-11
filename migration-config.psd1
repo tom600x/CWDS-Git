@@ -1,7 +1,7 @@
 @{
     CollectionUrl       = 'https://dev.azure.com/PA-EBR/'
-    GitTfPath           = 'C:\work-temp\gittf\git-tf.cmd'
-    WorkRoot            = 'C:\work-temp\cwds-tfvc-migration'
+    GitTfPath           = 'C:\work-temp\git-tf\git-tf.cmd'
+    WorkRoot            = 'C:\w3'
     OutputRepository    = 'C:\work-temp\cwds-tfvc-migration\CWDS-Git'
     DestinationUrl      = ''
     LargeFileThresholdMB = 95

@@ -276,12 +276,17 @@ function Invoke-Clone {
 
     $rootRef = $null
     if (Test-Path -LiteralPath $gitDirectory) {
+        $remoteConfigLines = @(
+            Invoke-GitCapture $Config.OutputRepository @('config', '--list') |
+                Where-Object { $_ -match '^tfs-remote\..+\.repository=' } |
+                ForEach-Object { $_ -replace '^([^=]+)=', '$1 ' }
+        )
+        if ($remoteConfigLines.Count -eq 0) {
+            throw "OutputRepository '$($Config.OutputRepository)' contains a Git repository but no git-tfs remotes. It is not a resumable TFVC clone. Preserve it and select a new, nonexistent OutputRepository for a clean clone, or restore the complete original .git directory for a resume. Do not run git init on the new clone destination."
+        }
         Invoke-Git $Config.OutputRepository @(
             'config', 'git-tfs.workspace-dir', $Config.WorkspacePath
         )
-        $remoteConfigLines = @(Invoke-GitCapture $Config.OutputRepository @(
-            'config', '--get-regexp', '^tfs-remote\..*\.repository$'
-        ))
         foreach ($line in $remoteConfigLines) {
             $match = [regex]::Match(
                 $line,
