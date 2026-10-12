@@ -271,17 +271,31 @@ function Invoke-Clone {
         (Test-Path -LiteralPath $Config.OutputRepository) -and
         -not (Test-Path -LiteralPath $gitDirectory)
     ) {
-        throw "Output path '$($Config.OutputRepository)' exists but is not a resumable Git repository."
+        if (-not (Test-Path -LiteralPath $Config.OutputRepository -PathType Container)) {
+            throw "Output path '$($Config.OutputRepository)' is a file. Select a directory for OutputRepository."
+        }
+        $existingItems = @(
+            Get-ChildItem -LiteralPath $Config.OutputRepository -Force |
+                Select-Object -First 1
+        )
+        if ($existingItems.Count -gt 0) {
+            throw "Output path '$($Config.OutputRepository)' is non-empty and has no .git directory. Preserve its contents and select a new or empty OutputRepository for a clean clone."
+        }
     }
 
     $rootRef = $null
     if (Test-Path -LiteralPath $gitDirectory) {
+        $remoteConfigLines = @(
+            Invoke-GitCapture $Config.OutputRepository @('config', '--list') |
+                Where-Object { $_ -match '^tfs-remote\..+\.repository=' } |
+                ForEach-Object { $_ -replace '^([^=]+)=', '$1 ' }
+        )
+        if ($remoteConfigLines.Count -eq 0) {
+            throw "OutputRepository '$($Config.OutputRepository)' contains a Git repository but no git-tfs remotes. It is not a resumable TFVC clone. Preserve it and select a new, nonexistent OutputRepository for a clean clone, or restore the complete original .git directory for a resume. Do not run git init on the new clone destination."
+        }
         Invoke-Git $Config.OutputRepository @(
             'config', 'git-tfs.workspace-dir', $Config.WorkspacePath
         )
-        $remoteConfigLines = @(Invoke-GitCapture $Config.OutputRepository @(
-            'config', '--get-regexp', '^tfs-remote\..*\.repository$'
-        ))
         foreach ($line in $remoteConfigLines) {
             $match = [regex]::Match(
                 $line,

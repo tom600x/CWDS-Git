@@ -178,6 +178,14 @@ Enter a short-lived PAT with **Code: Read** when prompted. The PAT is read as a 
 
 On success, the validator writes `tfvc-topology.json` under `WorkRoot`. It contains only branch paths, the validated root, and a timestamp—never the PAT. The Clone phase requires this file and uses its complete ancestor set to build the branch-ignore expression.
 
+The validator accepts a single branch object or a collection response, but
+requires exactly one case-insensitive exact path match. If validation fails on
+another machine, its error lists the returned paths and response property names.
+Check the copied configuration's organization/project and the PAT identity's
+TFVC Read permissions; a missing result does not by itself prove that the branch
+was deleted. A VM does not require a new metadata validation just to resume a
+copied repository when the matching `tfvc-topology.json` was also preserved.
+
 ## POC run
 
 The POC proves topology, completeness, resumability, elapsed time, and repository size. It must not push to the final Azure Repos repository.
@@ -214,6 +222,12 @@ The generated ignore expression limits branch initialization to the validated ro
 ```
 
 Do not delete or move the partial `OutputRepository`; it contains the resumable state.
+
+For a first run, `OutputRepository` may be nonexistent or an empty directory
+(including no hidden files). Do not run `git init` there; git-tfs initializes
+the repository itself. A non-empty directory without `.git` is rejected to
+protect existing contents. Keep `tfvc-topology.json` directly under `WorkRoot`,
+not inside the new `OutputRepository`.
 
 ### Restart after changing clone parameters
 

@@ -18,7 +18,10 @@ if (-not $Pat) {
 
 $bstr = [Runtime.InteropServices.Marshal]::SecureStringToBSTR($Pat)
 try {
-    $plainPat = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr)
+    $plainPat = [Runtime.InteropServices.Marshal]::PtrToStringBSTR($bstr).Trim()
+    if ([string]::IsNullOrWhiteSpace($plainPat)) {
+        throw 'The Azure DevOps PAT is empty.'
+    }
     $basicToken = [Convert]::ToBase64String(
         [Text.Encoding]::ASCII.GetBytes(":$plainPat")
     )
@@ -67,6 +70,33 @@ function Get-OptionalProperty {
     return $property.Value
 }
 
+function Get-ExactTfvcBranch {
+    param(
+        [AllowNull()][object]$Response,
+        [Parameter(Mandatory)][string]$Path
+    )
+
+    $values = Get-OptionalProperty $Response 'value'
+    $candidates = if ($null -ne $values) { @($values) } else { @($Response) }
+    $matches = @($candidates | Where-Object {
+        $candidatePath = [string](Get-OptionalProperty $_ 'path')
+        $candidatePath.Equals($Path, [StringComparison]::OrdinalIgnoreCase)
+    })
+    if ($matches.Count -ne 1) {
+        $returnedPaths = @($candidates | ForEach-Object {
+            $candidatePath = [string](Get-OptionalProperty $_ 'path')
+            if (-not [string]::IsNullOrWhiteSpace($candidatePath)) {
+                $candidatePath
+            }
+        })
+        $properties = if ($null -ne $Response) {
+            $Response.PSObject.Properties.Name -join ', '
+        } else { '(null response)' }
+        throw "Expected exactly one registered TFVC branch matching '$Path', but found $($matches.Count). Returned paths: [$($returnedPaths -join ', ')]. Response properties: [$properties]. Check CollectionUrl, ProjectName, the exact branch path, and the PAT identity's TFVC Read permissions."
+    }
+    return $matches[0]
+}
+
 $branchesByPath = @{}
 $queue = [System.Collections.Queue]::new()
 foreach ($definition in $config.Branches) {
@@ -79,12 +109,8 @@ while ($queue.Count -gt 0) {
         continue
     }
 
-    $response = Get-TfvcBranch $path
+    $response = Get-ExactTfvcBranch -Response (Get-TfvcBranch $path) -Path $path
     $branchPath = [string](Get-OptionalProperty $response 'path')
-    if ([string]::IsNullOrWhiteSpace($branchPath) -or
-        -not $branchPath.Equals($path, [StringComparison]::OrdinalIgnoreCase)) {
-        throw "'$path' was not returned as an exact registered TFVC branch."
-    }
 
     $parent = Get-OptionalProperty $response 'parent'
     $parentPath = [string](Get-OptionalProperty $parent 'path')
